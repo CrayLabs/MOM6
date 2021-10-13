@@ -654,8 +654,8 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
         call calc_isoneutral_slopes(G, GV, US, h, e, tv, dt*1.e-7, slope_x, slope_y)
         call pass_vector(slope_x, slope_y, G%Domain)
         do j=js-1,je+1; do i=is-1,ie+1
-          slope_x_vert_avg(i,j) = vertical_average(slope_x(i,j,2:(nz+1)), h_u(i,j,:))
-          slope_y_vert_avg(i,j) = vertical_average(slope_y(i,j,2:(nz+1)), h_v(i,j,:))
+          slope_x_vert_avg(i,j) = vertical_average(slope_x(i,j,2:(nz+1)), h_u(i,j,:), GV%H_subroundoff)
+          slope_y_vert_avg(i,j) = vertical_average(slope_y(i,j,2:(nz+1)), h_v(i,j,:), GV%H_subroundoff)
         enddo; enddo
         call pass_vector(slope_x_vert_avg, slope_y_vert_avg, G%Domain)
         CS%slope_z(:,:) = 0.
@@ -730,7 +730,11 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
       call cpu_clock_end(CS%id_unpack_tensor)
       MEKE%MEKE = reshape(CS%MEKE_vec, shape(MEKE%MEKE))
       do j=js,je; do i=is,ie
-        MEKE%MEKE(i,j) = MIN(MAX(exp(MEKE%MEKE(i,j)),0.),10.)
+        if (G%mask2dT(i,j) > 0.) then
+          MEKE%MEKE(i,j) = MIN(MAX(exp(MEKE%MEKE(i,j)),0.),10.)
+        else
+          MEKE%MEKE(i,j) = 0.
+        endif
       enddo; enddo
 
       write(time_suffix,"(F16.0)") time_type_to_real(Time)
@@ -1205,7 +1209,7 @@ subroutine MEKE_init(Time, G, US, param_file, diag, client, CS, MEKE, restart_CS
                            ! run to the representation in a restart file.
   real    :: MEKE_restoring_timescale ! The timescale used to nudge MEKE toward its equilibrium value.
   real :: cdrag            ! The default bottom drag coefficient [nondim].
-  character(len=8) :: eke_source_str
+  character(len=16) :: eke_source_str
   character(len=200) :: eke_filename, model_filename, script_filename
   integer :: i, j, is, ie, js, je, isd, ied, jsd, jed
   logical :: laplacian, biharmonic, useVarMix, coldStart
@@ -1777,16 +1781,17 @@ subroutine MEKE_end(MEKE, CS)
 end subroutine MEKE_end
 
 !> Compute thickness weighted average of a column quantity
-real function vertical_average(h, uh)
+real function vertical_average(h, uh, h_min)
 
-  real, dimension(:) :: h  !< Layer Thicknesses
-  real, dimension(:) :: uh !< Quantity to average
+  real, dimension(:), intent(in) :: h  !< Layer Thicknesses
+  real, dimension(:), intent(in) :: uh !< Quantity to average
+  real, intent(in) :: h_min !< The vanishingly small layer thickness
 
   real :: htot
   integer :: k, nk
 
   nk = size(uh)
-  htot = 0.
+  htot = h_min
   do k=1,nk
     htot = htot + h(k)
   enddo
