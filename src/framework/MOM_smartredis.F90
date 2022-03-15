@@ -24,6 +24,7 @@ subroutine smartredis_init(param_file, client, client_in)
   logical :: use_smartredis
   logical :: use_smartredis_cluster
   integer :: id_client_init
+  integer :: return_code
   call get_param(param_file, mdl, "USE_SMARTREDIS",  use_smartredis, &
                  "If true, use the data client to connect"//&
                  "with the SmartRedis database", default=.false.)
@@ -45,7 +46,10 @@ subroutine smartredis_init(param_file, client, client_in)
                    default=.true.)
     id_client_init = cpu_clock_id('(SMARTREDIS client init)', grain=CLOCK_ROUTINE)
     call cpu_clock_begin(id_client_init)
-    call client%initialize(use_smartredis_cluster)
+    return_code = client%initialize(use_smartredis_cluster)
+    if (client%SR_error_parser(return_code)) then
+      call MOM_error(FATAL, "SmartRedis client failed to initialize")
+    endif
     call cpu_clock_end(id_client_init)
 
   endif
