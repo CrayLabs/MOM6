@@ -146,7 +146,7 @@ use MOM_oda_driver_mod,        only : ODA_CS, oda, init_oda, oda_end
 use MOM_oda_driver_mod,        only : set_prior_tracer, set_analysis_time, apply_oda_tracer_increments
 
 ! Machine-learning model interface
-use MOM_smartredis,            only : client_type, smartredis_init
+use MOM_smartredis,            only : smartredis_CS_type, smartredis_init, client_type
 use MOM_oda_incupd,            only : oda_incupd_CS, init_oda_incupd_diags
 
 ! Offline modules
@@ -409,7 +409,7 @@ type, public :: MOM_control_struct ; private
   type(ODA_CS), pointer :: odaCS => NULL() !< a pointer to the control structure for handling
                                 !! ensemble model state vectors and data assimilation
                                 !! increments and priors
-  type(client_type) :: client   !< The SmartRedis client used to communicate with the database
+  type(smartredis_CS_type)  :: smartredis_CS !< SmartRedis control structure for online ML/AI
   type(porous_barrier_ptrs) :: pbv !< porous barrier fractional cell metrics
   real ALLOCABLE_, dimension(NIMEMB_PTR_,NJMEM_,NKMEM_) &
                             :: por_face_areaU !< fractional open area of U-faces [nondim]
@@ -1190,7 +1190,7 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_thermo, &
 
   if (CS%useMEKE .and. CS%MEKE_in_dynamics) call step_forward_MEKE(CS%MEKE, h, CS%VarMix%SN_u, CS%VarMix%SN_v, &
                                 CS%visc, dt, G, GV, US, CS%MEKE_CSp, CS%uhtr, CS%vhtr, &
-                                CS%u, CS%v, CS%tv, Time_local, CS%client)
+                                CS%u, CS%v, CS%tv, Time_local, CS%smartredis_CS)
   call disable_averaging(CS%diag)
 
   ! Advance the dynamics time by dt.
@@ -1273,7 +1273,7 @@ subroutine step_MOM_tracer_dyn(CS, G, GV, US, h, Time_local)
   if (CS%useMEKE .and. (.not. CS%MEKE_in_dynamics)) &
     call step_forward_MEKE(CS%MEKE, h, CS%VarMix%SN_u, CS%VarMix%SN_v, &
                            CS%visc, CS%t_dyn_rel_adv, G, GV, US, CS%MEKE_CSp, CS%uhtr, CS%vhtr, &
-                           CS%u, CS%v, CS%tv, Time_local, CS%client)
+                           CS%u, CS%v, CS%tv, Time_local, CS%smartredis_CS)
 
   call cpu_clock_begin(id_clock_other) ; call cpu_clock_begin(id_clock_diagnostics)
   call post_transport_diagnostics(G, GV, US, CS%uhtr, CS%vhtr, h, CS%transport_IDs, &
@@ -2749,9 +2749,9 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   call cpu_clock_end(id_clock_MOM_init)
   call callTree_waypoint("ALE initialized (initialize_MOM)")
 
-  call smartredis_init( param_file, CS%client, client_in)
+  call smartredis_init( param_file, CS%smartredis_CS, client_in)
 
-  CS%useMEKE = MEKE_init(Time, G, US, param_file, diag, CS%client, CS%MEKE_CSp, CS%MEKE, restart_CSp, CS%MEKE_in_dynamics)
+  CS%useMEKE = MEKE_init(Time, G, US, param_file, diag, CS%smartredis_CS, CS%MEKE_CSp, CS%MEKE, restart_CSp, CS%MEKE_in_dynamics)
 
   call VarMix_init(Time, G, GV, US, param_file, diag, CS%VarMix)
   call set_visc_init(Time, G, GV, US, param_file, diag, CS%visc, CS%set_visc_CSp, restart_CSp, CS%OBC)

@@ -19,7 +19,7 @@ use MOM_hor_index,        only : hor_index_type
 use MOM_interface_heights, only : find_eta
 use MOM_io,               only : vardesc, var_desc, slasher
 use MOM_time_manager,     only : time_type_to_real
-use MOM_smartredis,       only : client_type
+use MOM_smartredis,       only : client_type, smartredis_CS_type
 use MOM_string_functions, only : lowercase
 use MOM_restart,          only : MOM_restart_CS, register_restart_field, query_initialized
 use MOM_unit_scaling,     only : unit_scale_type
@@ -166,7 +166,7 @@ contains
 
 !> Integrates forward-in-time the MEKE eddy energy equation.
 !! See \ref section_MEKE_equations.
-subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, hv, u, v, tv, Time, client)
+subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, hv, u, v, tv, Time, smartredis_CS)
   type(MEKE_type),                          intent(inout) :: MEKE !< MEKE fields
   type(ocean_grid_type),                    intent(inout) :: G    !< Ocean grid.
   type(verticalGrid_type),                  intent(in)    :: GV   !< Ocean vertical grid structure.
@@ -183,7 +183,7 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
   real, dimension(SZI_(G),SZJB_(G),SZK_(G)), intent(inout)   :: v    !< Meridional velocity
   type(thermo_var_ptrs),                    intent(in)    :: tv   !< Type containing thermodynamic variables
   type(time_type),                          intent(in)    :: Time !< The time used for interpolating EKE
-  type(client_type),                        intent(in)    :: client !< The SmartRedis client used for ML_EKE
+  type(smartredis_CS_type),                 intent(in)    :: smartredis_CS !< The SmartRedis CS used for ML_EKE
 
   ! Local variables
   real(kind=8), dimension(SZI_(G),SZJ_(G)) :: &
@@ -251,6 +251,7 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
   character(len=128), dimension(1) :: model_out
   character(len=128), dimension(2) :: postprocess_in
   character(len=128), dimension(1) :: postprocess_out
+  type(client_type) :: client
 
   character(len=24) :: time_suffix
   real :: time_real
@@ -657,6 +658,7 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
         MEKE%MEKE(i,j) = data_eke(i,j) * G%mask2dT(i,j)
       enddo; enddo
     case (EKE_SMARTREDIS)
+      client = smartredis_CS%client
       call MEKE_lengthScales(CS, MEKE, G, GV, US, SN_u, SN_v, MEKE%MEKE, depth_tot, bottomFac2, barotrFac2, LmixScale)
       call pass_vector(u, v, G%Domain)
       ! Linear interpolation to estimate thickness at a velocity points
@@ -749,8 +751,11 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
       model_out(1) = "EKE"//CS%key_suffix
       model_in(1) = "features"//CS%key_suffix
       call cpu_clock_begin(CS%id_run_model)
-      sr_return_code = client%run_model(CS%model_key, model_in, model_out)
+      sr_return_code = smartredis_CS%client%run_model(CS%model_key, model_in, model_out)
       call cpu_clock_end(CS%id_run_model)
+      if (client%SR_error_parser(sr_return_code)) then
+        call MOM_error(FATAL, "MEKE: run_model failed")
+      endif
       postprocess_in(1) = model_out(1)
       postprocess_in(2) = "EKE_shape"//CS%key_suffix
       postprocess_out(1) = "EKE_2D"//CS%key_suffix
@@ -1221,12 +1226,12 @@ end subroutine MEKE_lengthScales_0d
 
 !> Initializes the MOM_MEKE module and reads parameters.
 !! Returns True if module is to be used, otherwise returns False.
-logical function MEKE_init(Time, G, US, param_file, diag, client, CS, MEKE, restart_CS, meke_in_dynamics)
+logical function MEKE_init(Time, G, US, param_file, diag, smartredis_CS, CS, MEKE, restart_CS, meke_in_dynamics)
   type(time_type),         intent(in)    :: Time       !< The current model time.
   type(ocean_grid_type),   intent(inout) :: G          !< The ocean's grid structure.
   type(unit_scale_type),   intent(in)    :: US         !< A dimensional unit scaling type
   type(param_file_type),   intent(in)    :: param_file !< Parameter file parser structure.
-  type(client_type),       intent(in)    :: client     !< SmartRedis client
+  type(smartredis_CS_type),intent(in)    :: smartredis_CS !< SmartRedis client
   type(diag_ctrl), target, intent(inout) :: diag       !< Diagnostics structure.
   type(MEKE_CS),           intent(inout) :: CS         !< MEKE control structure.
   type(MEKE_type),         intent(inout) :: MEKE       !< MEKE fields
@@ -1242,9 +1247,11 @@ logical function MEKE_init(Time, G, US, param_file, diag, client, CS, MEKE, rest
   real    :: MEKE_restoring_timescale ! The timescale used to nudge MEKE toward its equilibrium value.
   real :: cdrag            ! The default bottom drag coefficient [nondim].
   character(len=16) :: eke_source_str
+  type(client_type) :: client
   character(len=200) :: eke_filename, model_filename, script_filename
   integer :: i, j, is, ie, js, je, isd, ied, jsd, jed
   logical :: laplacian, biharmonic, useVarMix, coldStart
+  logical :: smartredis_colocated
   ! This include declares and sets the variable "version".
 # include "version_variable.h"
   character(len=40)  :: mdl = "MOM_MEKE" ! This module's name.
@@ -1296,6 +1303,7 @@ logical function MEKE_init(Time, G, US, param_file, diag, client, CS, MEKE, rest
       eke_filename = trim(CS%inputdir) // trim(CS%eke_file)
       CS%id_eke = init_external_field(eke_filename, CS%eke_var_name, domain=G%Domain%mpp_domain)
     case ("smartredis")
+      client = smartredis_CS%client
       CS%eke_src = EKE_SMARTREDIS
       CS%n_predictands = 0
       write(CS%key_suffix, '(A,I6.6)') '_', PE_here()
@@ -1314,10 +1322,22 @@ logical function MEKE_init(Time, G, US, param_file, diag, client, CS, MEKE, rest
                    "The computational backend to use for EKE inference (CPU or GPU)", default="GPU")
 
       call get_param(param_file, mdl, "EKE_MODEL", model_filename, &
-                     "Filename of the a saved pyTorch model to use", default='')
-      if (len_trim(model_filename) > 0 .and. is_root_pe()) then
-        sr_return_code = client%set_model_from_file(CS%model_key, trim(CS%inputdir)//trim(model_filename), "TORCH", backend, &
-                                         batch_size=batch_size)
+                     "Filename of the a saved pyTorch model to use", fail_if_missing = .true.)
+
+      if (smartredis_CS%colocated) then
+        if (modulo(PE_here(),smartredis_CS%colocated_stride) == 0) then
+          sr_return_code = client%set_model_from_file(CS%model_key, trim(CS%inputdir)//trim(model_filename), &
+                                                      "TORCH", backend, batch_size=batch_size)
+        endif
+      else
+        if (is_root_pe()) then
+          sr_return_code = client%set_model_from_file(CS%model_key, trim(CS%inputdir)//trim(model_filename), &
+                                                      "TORCH", backend, batch_size=batch_size)
+          if (client%SR_error_parser(sr_return_code)) then
+            print *, sr_return_code
+            call MOM_error(FATAL, "MEKE: set_model failed")
+          endif
+        endif
       endif
       call get_param(param_file, mdl, "EKE_PREPROCESS_SCRIPT", script_filename, &
                      "Filename of the preprocessing script", default='')
